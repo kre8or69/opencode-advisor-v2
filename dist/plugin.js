@@ -36,10 +36,11 @@ const topicMaxLength = 120;
 function normalizeTopic(value) {
     if (typeof value !== 'string')
         return undefined;
-    const topic = value.replace(/\s+/g, ' ').trim();
+    const topic = value.replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (!topic)
         return undefined;
-    return topic.length > topicMaxLength ? `${topic.slice(0, topicMaxLength - 1)}…` : topic;
+    const characters = Array.from(topic);
+    return characters.length > topicMaxLength ? `${characters.slice(0, topicMaxLength - 1).join('')}…` : topic;
 }
 function advisorTitle(topic) {
     return topic ? `Advisor — ${topic}` : 'Advisor — consulting…';
@@ -306,7 +307,8 @@ const plugin = { id: 'opencode-advisor', async setup(ctx) {
                     if (context.signal.aborted)
                         cancel();
                     const timer = setTimeout(() => controller.abort(Error('Advisor timed out')), options.timeoutMs);
-                    const done = context.progress({ title })
+                    const ready = abortable(context.progress({ title }).catch(() => { }), controller.signal).catch(() => { });
+                    const done = ready
                         .then(() => consult(context.sessionID, context.messageID, controller.signal, topic))
                         .then(result => ({ ...result, metadata: { ...(result.metadata ?? {}), title } }))
                         .finally(() => {

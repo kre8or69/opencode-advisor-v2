@@ -15,7 +15,7 @@ function host(options = {}) {
 	const transcripts = new Map();
 	const queues = new Set();
 	const register = async callback => {callback(); return {dispose:async()=>{disposed++;}};};
-	const h = {calls, agents, hooks, tools, transcripts, progress:[],
+	const h = {calls, agents, hooks, tools, transcripts, progress:[], progressSawConsult:[],
 		get disposed(){return disposed;}, get subscriptions(){return subscriptions;},
 		source:[user('msg_u','Objective'), assistant('msg_previous','Prior advice'), assistant('msg_current','Excluded')],
 		ctx:{ options,
@@ -52,7 +52,7 @@ function host(options = {}) {
 		run(sessionID='ses_source', extra={}, input={}){
 			return tools.advisor.execute(input, {sessionID,messageID:'msg_current',agent:'build',
 				signal:new AbortController().signal,
-				progress:async update=>{h.progress.push(update);},...extra});
+				progress:async update=>{h.progress.push(update);h.progressSawConsult.push(h.calls.some(c=>c[0]==='create'||c[0]==='prompt'));},...extra});
 		},
 	}; return h;
 }
@@ -78,6 +78,7 @@ test('topic labels the consultation card and child session',async t=>{
 	t.is(r.content,'Advice');
 	t.is(r.metadata.title,'Advisor — choosing between A and B');
 	t.deepEqual(h.progress[0],{title:'Advisor — choosing between A and B'});
+	t.deepEqual(h.progressSawConsult,[false]);
 	t.is(h.calls.find(c=>c[0]==='create')[1].title,'advisor — choosing between A and B');
 	await h.cleanup();
 });
@@ -85,6 +86,7 @@ test('no topic uses the consulting fallback',async t=>{
 	const h=host();await h.setup();
 	const r=await h.run();
 	t.is(r.metadata.title,'Advisor — consulting…');
+	t.deepEqual(h.progress[0],{title:'Advisor — consulting…'});
 	t.is(h.calls.find(c=>c[0]==='create')[1].title,'advisor — consulting');
 	await h.cleanup();
 });
@@ -92,7 +94,47 @@ test('topic is truncated to one line of 120 characters',async t=>{
 	const h=host();await h.setup();
 	const r=await h.run('ses_source',{}, {topic:'x'.repeat(200)});
 	t.is(r.metadata.title,`Advisor — ${'x'.repeat(119)}…`);
+	t.is(Array.from(r.metadata.title).length,Array.from('Advisor — ').length+120);
 	t.false(r.metadata.title.includes('\n'));
+	await h.cleanup();
+});
+test('topic with a newline and controls collapses to one line',async t=>{
+	const h=host();await h.setup();
+	const r=await h.run('ses_source',{}, {topic:'line one\nline two\u0000line three'});
+	t.is(r.metadata.title,'Advisor — line one line two line three');
+	t.false(r.metadata.title.includes('\n'));
+	t.is(h.calls.find(c=>c[0]==='create')[1].title,'advisor — line one line two line three');
+	await h.cleanup();
+});
+test('truncation does not split a surrogate pair',async t=>{
+	const h=host();await h.setup();
+	const r=await h.run('ses_source',{}, {topic:'😀'.repeat(200)});
+	t.is(r.metadata.title,`Advisor — ${'😀'.repeat(119)}…`);
+	await h.cleanup();
+});
+test('empty, whitespace-only, and non-string topics use the fallback',async t=>{
+	for(const topic of ['','   ','\n\t',42,null,{},[]]){
+		const h=host();await h.setup();
+		const r=await h.run('ses_source',{}, {topic});
+		t.is(r.metadata.title,'Advisor — consulting…');
+		t.is(h.calls.find(c=>c[0]==='create')[1].title,'advisor — consulting');
+		await h.cleanup();
+	}
+});
+test('progress rejection still returns advice with a title',async t=>{
+	const h=host();await h.setup();
+	const r=await h.run('ses_source',{progress:async()=>{throw Error('progress failed');}},{topic:'rejecting progress'});
+	t.is(r.content,'Advice');
+	t.is(r.metadata.title,'Advisor — rejecting progress');
+	t.is(h.calls.find(c=>c[0]==='create')[1].title,'advisor — rejecting progress');
+	await h.cleanup();
+});
+test('stalled progress times out with a title and releases the guard',async t=>{
+	const h=host({timeoutMs:100});await h.setup();
+	const r=await h.run('ses_source',{progress:()=>new Promise(()=>{})},{topic:'stalled progress'});
+	t.regex(r.content,/timed out/);
+	t.is(r.metadata.title,'Advisor — stalled progress');
+	t.is((await h.run()).content,'Advice');
 	await h.cleanup();
 });
 
@@ -128,7 +170,9 @@ for(const outcome of ['failed','interrupted']) test(`terminal ${outcome} returns
 });
 test('completed output with no text returns no advice',async t=>{const h=host();h.ctx.session.prompt=async({sessionID})=>{h.complete(sessionID,'msg_input','');return{id:'msg_input',sessionID};};await h.setup();t.regex((await h.run()).content,/no advice/);await h.cleanup();});
 for(const method of ['create','prompt'])test(`${method} failure releases guard`,async t=>{
-	const h=host();const old=h.ctx.session[method];h.ctx.session[method]=async()=>{throw Error('boom');};await h.setup();t.regex((await h.run()).content,/boom/);h.ctx.session[method]=old;t.is((await h.run()).content,'Advice');await h.cleanup();
+	const h=host();const old=h.ctx.session[method];h.ctx.session[method]=async()=>{throw Error('boom');};await h.setup();
+	const failed=await h.run('ses_source',{}, {topic:'failure path'});t.regex(failed.content,/boom/);t.is(failed.metadata.title,'Advisor — failure path');
+	h.ctx.session[method]=old;t.is((await h.run('ses_source',{}, {topic:'retry'})).content,'Advice');await h.cleanup();
 });
 test('same-source overlap rejected while independent sources run',async t=>{
 	const h=host();await h.setup();const a=h.run();t.regex((await h.run()).content,/already.*progress/);const b=h.run('ses_other');t.is((await a).content,'Advice');t.is((await b).content,'Advice');await h.cleanup();

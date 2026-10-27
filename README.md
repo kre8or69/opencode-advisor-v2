@@ -91,7 +91,7 @@ This policy cannot be overridden. The hidden agent cannot write files, use LSP, 
 ## How it works
 
 1. The executor receives the `advisor()` tool.
-2. The executor calls it without arguments.
+2. The executor calls it, optionally with a topic.
 3. The plugin fetches the session transcript, excluding the calling message.
 4. The plugin creates an ephemeral session and prompts the hidden `opencode-advisor:advisor` agent.
 5. The hidden agent supplies its model, system prompt, temperature, and permissions.

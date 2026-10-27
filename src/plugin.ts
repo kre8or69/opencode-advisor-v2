@@ -36,9 +36,10 @@ const topicDescription = 'One-line summary of the question or decision, for disp
 const topicMaxLength = 120;
 function normalizeTopic(value: unknown): string | undefined {
 	if (typeof value !== 'string') return undefined;
-	const topic = value.replace(/\s+/g, ' ').trim();
+	const topic = value.replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim();
 	if (!topic) return undefined;
-	return topic.length > topicMaxLength ? `${topic.slice(0, topicMaxLength - 1)}…` : topic;
+	const characters = Array.from(topic);
+	return characters.length > topicMaxLength ? `${characters.slice(0, topicMaxLength - 1).join('')}…` : topic;
 }
 function advisorTitle(topic: string | undefined): string {
 	return topic ? `Advisor — ${topic}` : 'Advisor — consulting…';
@@ -227,7 +228,10 @@ const plugin: Plugin.Plugin = { id: 'opencode-advisor', async setup(ctx) {
 				const cancel=()=>controller.abort(Error('Advisor cancelled'));
 				context.signal.addEventListener('abort',cancel,{once:true});if(context.signal.aborted) cancel();
 				const timer=setTimeout(()=>controller.abort(Error('Advisor timed out')),options.timeoutMs);
-				const done=context.progress({title})
+				// Progress is chained (not awaited) so calls.set registers the same-source guard before
+				// any await. Rejection or abort ends the wait; a hung progress is bounded by the timer.
+				const ready=abortable(context.progress({title}).catch(()=>{}),controller.signal).catch(()=>{});
+				const done=ready
 					.then(()=>consult(context.sessionID,context.messageID,controller.signal,topic))
 					.then(result=>({...result,metadata:{...(result.metadata ?? {}),title}}))
 					.finally(()=>{
