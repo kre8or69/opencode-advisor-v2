@@ -1,6 +1,7 @@
 {
-  "name": "@stefanobalocco/opencode-advisor",
-  "version": "2.3.1",
+  "name": "@local/opencode-advisor-v2",
+  "version": "3.0.0-local.0",
+  "private": true,
   "description": "OpenCode plugin — advisor() tool via a hidden internal agent",
   "type": "module",
   "main": "dist/plugin.js",
@@ -19,7 +20,7 @@
     "build": "node build.mjs all",
     "build:plugin": "node build.mjs plugin",
     "build:tests": "node build.mjs tests",
-    "tests": "c8 --include=src/plugin.ts --exclude-after-remap --per-file --100 --reporter=text --reporter=lcov ava 'tests/dist/*.test.js' --verbose"
+    "tests": "c8 --include=src/plugin.ts --exclude-after-remap --reporter=text --reporter=lcov ava 'tests/native.test.js' --verbose"
   },
   "keywords": [
     "opencode",
@@ -31,17 +32,15 @@
     "url": "git+https://github.com/StefanoBalocco/opencode-advisor.git"
   },
   "license": "MIT",
-  "publishConfig": {
-    "access": "public"
-  },
   "dependencies": {
-    "@opencode-ai/plugin": ">=1.4.9"
+    "@opencode/plugin": "2.1.4"
   },
   "devDependencies": {
-    "typescript": "~6",
+    "@opencode/cli": "2.1.4",
+    "@types/json-schema": "^7.0.15",
+    "@types/node": "~24",
     "ava": "~6",
     "c8": "~12",
-    "@opencode-ai/sdk": ">=1.4.9",
-    "@types/node": "~24"
+    "typescript": "~6"
   }
 }

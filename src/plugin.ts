@@ -1,30 +1,14 @@
-import type { Config as PluginConfig, Plugin } from "@opencode-ai/plugin";
-import { tool } from "@opencode-ai/plugin";
-import type {
-	Event,
-	Part,
-	SessionStatus,
-	TextPart,
-	TextPartInput,
-} from "@opencode-ai/sdk";
+import type { Model, Plugin } from '@opencode/plugin';
 
-// ── Constants ──────────────────────────────────────────────────────────────
-
-const defaultModel: string = "deepseek/deepseek-v4-pro";
-const defaultFailureThreshold: number = 3;
-const advisorAgent: string = "opencode-advisor:advisor";
-
-// ── Default prompts ────────────────────────────────────────────────────────
-
-const advisorDefaultPrompt: string = `Act as a strategic advisor to a coding agent. Read the conversation transcript, identify the current objective, and provide a concise plan or course correction.
+const advisorAgent = 'opencode-advisor:advisor';
+const defaultPrompt = `Act as a strategic advisor to a coding agent. Read the conversation transcript, identify the current objective, and provide a concise plan or course correction.
 
 Give the executor clear, ordered instructions. State what to do next, the sequence to follow, the main risks, and the actions to avoid. Prefer the simplest solution that satisfies the specification. Flag choices that add unnecessary code, indirection, or maintenance burden. When the executor is stuck, repeating failed attempts, or following a disproved assumption, redirect the approach. State plainly when tests, logs, or other evidence contradict the current reasoning.
 
-Use read-only tools only when they add necessary context. You may inspect the workspace with "read", "glob", and "grep", consult public sources with "webfetch" and "websearch", and load relevant skills. Do not edit files, change system state, or run commands other than read-only shell commands.
+Use read-only tools only when they add necessary context. You may inspect the workspace with "read", "glob", and "grep", consult public sources with "webfetch" and "websearch", and load relevant skills. Do not edit files, change system state, or run shell commands.
 
 Respond in fewer than 300 words. Use numbered steps. Do not write code; provide advice only.`;
-
-const advisorToolDescription: string = `Consult a strategic advisor that reads the full conversation and returns a concise plan or course correction.
+const description = `Consult a strategic advisor that reads the text of the active post-compaction conversation context and returns a concise plan or course correction. Earlier history is represented only by available compaction summaries; the calling assistant message, reasoning, files, and tool results are excluded.
 
 Call "advisor" before substantive work: writing code, editing files, choosing an interpretation, or relying on an unverified assumption. Complete only the orientation needed to inform the review—locate files, read code, or fetch documentation—then call the advisor. Orientation is not substantive work.
 
@@ -33,659 +17,212 @@ Call it again when the approach stalls, errors recur, results contradict expecta
 For tasks longer than a few steps, consult the advisor before choosing an approach and again before completion. Skip it only on short, reactive turns where tool output directly determines the next action.
 
 Give the advice serious weight. Override a specific recommendation only when primary-source evidence disproves it. Present the conflict in another advisor call instead of changing course silently.`;
-
-// ── Fixed permission policy ────────────────────────────────────────────────
-// Object property order matters: later matching rules override the wildcard deny.
-
-const fixedPermission: Record<string, unknown> = {
-	"*": "deny",
-	"read": "allow",
-	"glob": "allow",
-	"grep": "allow",
-	"webfetch": "allow",
-	"websearch": "allow",
-	"skill": "allow",
-	"edit": "deny",
-	"bash": {
-		"*": "deny",
-		"wc *": "allow",
-		"git log *": "allow",
-		"git diff *": "allow",
-		"git show *": "allow",
-		"rtk wc *": "allow",
-		"rtk git log *": "allow",
-		"rtk git diff *": "allow",
-		"rtk git show *": "allow",
-	},
-};
-
-const fixedTools: Record<string, boolean> = {
-	read: true,
-	glob: true,
-	grep: true,
-	webfetch: true,
-	websearch: true,
-	skill: true,
-	edit: false,
-};
-
-// ── Profile types ──────────────────────────────────────────────────────────
-
-interface Profile {
-	model?: string;
-	variant?: string;
-	prompt?: string;
-	temperature?: number;
-	top_p?: number;
-	options?: Record<string, unknown>;
-	failureThreshold?: number;
+const safeTools = new Set(['read', 'glob', 'grep', 'webfetch', 'websearch', 'skill']);
+function permissions() {
+	return [ {action:'*',resource:'*',effect:'deny' as const},
+		...[...safeTools].map(action=>({action,resource:'*',effect:'allow' as const})),
+		{action:'shell',resource:'*',effect:'deny' as const} ];
+}
+function parseModel(input: string, override: string | undefined): Model.Ref {
+	const match = /^([^/\s#]+)\/([^\s#]+)(?:#([^\s#]+))?$/.exec(input);
+	if (!match) throw Error('advisor model must be provider/model optionally followed by #variant');
+	const variant = override ?? match[3];
+	return {providerID: match[1] as Model.Ref['providerID'], id: match[2] as Model.Ref['id'],
+		...(variant !== undefined ? {variant: variant as NonNullable<Model.Ref['variant']>} : {})};
+}
+function parseOptions(raw: unknown) {
+	if (raw === undefined) raw = {};
+	if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.getPrototypeOf(raw) !== Object.prototype)
+		throw Error('advisor options must be a plain object');
+	const o = raw as Record<string, unknown>;
+	for (const key of Object.keys(o)) if (!['model','variant','prompt','temperature','top_p','timeoutMs'].includes(key))
+		throw Error(`advisor option ${key} is unsupported in the manual v2 port`);
+	for (const key of ['model','variant','prompt']) if (o[key] !== undefined && typeof o[key] !== 'string')
+		throw Error(`advisor option ${key} must be a string`);
+	for (const key of ['temperature','top_p']) if (o[key] !== undefined && (typeof o[key] !== 'number' || !Number.isFinite(o[key])))
+		throw Error(`advisor option ${key} must be finite`);
+	const timeoutMs = o.timeoutMs ?? 120000;
+	if (typeof timeoutMs !== 'number' || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2147483647)
+		throw Error('advisor timeoutMs must be a positive timer-safe integer');
+	const model = parseModel((o.model ?? 'deepseek/deepseek-v4-pro') as string, o.variant as string | undefined);
+	return {model,
+		prompt: o.prompt as string | undefined ?? defaultPrompt,
+		temperature: o.temperature as number | undefined ?? 0,
+		topP: o.top_p as number | undefined, timeoutMs};
 }
 
-// ── General utility types ────────────────────────────────────────────────────
-
-export type Undefinedable<T> = T | undefined;
-
-// Allowed profile keys (order is descriptive, not enforced)
-const profileKeys: Set<string> = new Set( [
-	"model",
-	"variant",
-	"prompt",
-	"temperature",
-	"top_p",
-	"options",
-	"failureThreshold",
-] );
-
-// ── Validation helpers ─────────────────────────────────────────────────────
-
-function assertString( v: unknown, label: string, allowEmpty: boolean = false ): asserts v is string {
-	if( "string" === typeof v ) {
-		if( !allowEmpty && ( 0 === v.length ) ) {
-			throw new Error( `${label}: must not be empty` );
+type Messages = Awaited<ReturnType<Plugin.Context['session']['context']>>;
+function transcript(messages: Messages, excludedID: string) {
+	return messages.filter(m=>m.id !== excludedID).flatMap(m=>{
+		if(m.type === 'user') return m.text.trim() ? [`User: ${m.text}`] : [];
+		if(m.type === 'assistant') {
+			const text=m.content.filter(p=>p.type==='text').map(p=>p.text).join('');
+			return text.trim() ? [`Assistant: ${text}`] : [];
 		}
-	} else {
-		throw new Error( `${label}: must be a string, got ${typeof v}` );
+		if(m.type==='compaction' && m.status==='completed') {
+			const recent=typeof m.metadata?.recent==='string' ? m.metadata.recent : '';
+			if(m.summary.trim() || recent.trim()) return [`Compaction summary: ${m.summary}\n${recent}`];
+		}
+		return [];
+	}).join('\n\n');
+}
+function errorText(error: unknown) {return error instanceof Error ? error.message : String(error);}
+function checked(signal: AbortSignal) {if(signal.aborted) throw signal.reason ?? Error('Advisor cancelled');}
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	return new Promise((resolve,reject)=>{
+		const abort=()=>reject(signal.reason ?? Error('Advisor cancelled'));
+		signal.addEventListener('abort',abort,{once:true});
+		promise.then(resolve,reject).finally(()=>signal.removeEventListener('abort',abort));
+		if(signal.aborted) abort();
+	});
+}
+async function bounded<T>(operation: (signal: AbortSignal)=>Promise<T>) {
+	const controller=new AbortController();
+	const timer=setTimeout(()=>controller.abort(Error('cleanup timed out')),1000);
+	try{return await abortable(operation(controller.signal),controller.signal);}
+	finally{clearTimeout(timer);}
+}
+function pause(signal: AbortSignal) {
+	return new Promise<void>((resolve,reject)=>{
+		const done=()=>{signal.removeEventListener('abort',abort);resolve();};
+		const timer=setTimeout(done,20);
+		const abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);reject(signal.reason);};
+		signal.addEventListener('abort',abort,{once:true}); if(signal.aborted) abort();
+	});
+}
+
+const plugin: Plugin.Plugin = { id: 'opencode-advisor', async setup(ctx) {
+	const options = parseOptions(ctx.options);
+	const registrations: {dispose(): Promise<void>}[] = [];
+	let unloaded=false;
+	const calls=new Map<string,{controller:AbortController,done:Promise<unknown>}>();
+	const consultantSessions=new Set<string>();
+	async function cleanupSession(sessionID: string, interrupt: boolean) {
+		const failures: string[]=[];
+		if(interrupt) try {await bounded(signal=>ctx.session.interrupt({sessionID,resume:false},{signal}));}
+		catch(error){failures.push(`interrupt: ${errorText(error)}`);}
+		if(interrupt) try {await bounded(signal=>ctx.session.wait({sessionID},{signal}));}
+		catch(error){failures.push(`execution settlement: ${errorText(error)}`);}
+		try {await bounded(signal=>ctx.session.remove({sessionID},{signal}));}
+		catch(error){failures.push(`remove: ${errorText(error)}`);}
+		return failures;
 	}
-}
-
-function assertFiniteNumber( v: unknown, label: string ): asserts v is number {
-	if( "number" === typeof v ) {
-		if( !Number.isFinite( v ) ) {
-			throw new Error( `${label}: must be a finite number, got ${v}` );
-		}
-	} else {
-		throw new Error( `${label}: must be a finite number, got ${typeof v}` );
-	}
-}
-
-function isPlainObject( v: unknown ): v is Record<string, unknown> {
-	return ( "object" === typeof v ) && ( null !== v ) && !Array.isArray( v ) &&
-		( ( Object.prototype === Object.getPrototypeOf( v ) ) || ( null === Object.getPrototypeOf( v ) ) );
-}
-
-function assertValidOptionsValue( v: unknown, path: string ): void {
-	if( null === v ) {
-		// null is valid — no-op
-	} else if( "boolean" === typeof v ) {
-		// boolean valid — no-op
-	} else if( "string" === typeof v ) {
-		// string valid — no-op
-	} else if( "number" === typeof v ) {
-		if( !Number.isFinite( v ) ) {
-			throw new Error( `${path}: must be a finite number` );
-		}
-	} else if( Array.isArray( v ) ) {
-		for( let iL1: number = 0; iL1 < v.length; iL1++ ) {
-			assertValidOptionsValue( v[ iL1 ], `${path}[${iL1}]` );
-		}
-	} else if( isPlainObject( v ) ) {
-		const keys: string[] = Object.keys( v );
-		for( let iL1: number = 0; iL1 < keys.length; iL1++ ) {
-			assertValidOptionsValue( v[ keys[ iL1 ] ], `${path}.${keys[ iL1 ]}` );
-		}
-	} else {
-		throw new Error( `${path}: invalid option type ${typeof v}` );
-	}
-}
-
-function assertValidOptions( v: unknown, path: string ): asserts v is Record<string, unknown> {
-	if( isPlainObject( v ) ) {
-		const keys: string[] = Object.keys( v );
-		for( let iL1: number = 0; iL1 < keys.length; iL1++ ) {
-			assertValidOptionsValue( v[ keys[ iL1 ] ], `${path}.${keys[ iL1 ]}` );
-		}
-	} else {
-		throw new Error( `${path}: must be a non-array object, got ${null === v ? "null" : typeof v}` );
-	}
-}
-
-// ── Profile parser ─────────────────────────────────────────────────────────
-
-function parseProfile( value: unknown, section: string ): Profile {
-	let returnValue: Profile;
-
-	if( isPlainObject( value ) ) {
-		const obj: Record<string, unknown> = value;
-		const objKeys: string[] = Object.keys( obj );
-
-		// Check for unknown keys
-		for( let iL1: number = 0; iL1 < objKeys.length; iL1++ ) {
-			if( !profileKeys.has( objKeys[ iL1 ] ) ) {
-				throw new Error( `${section}: unknown key "${objKeys[ iL1 ]}". Allowed: ${Array.from( profileKeys ).join( ", " )}` );
-			}
-		}
-
-		const profile: Profile = {};
-
-		if( undefined !== obj.model ) {
-			assertString( obj.model, `${section}.model` );
-			const slashIdx: number = obj.model.indexOf( "/" );
-			if( ( 0 >= slashIdx ) || ( ( obj.model.length - 1 ) <= slashIdx ) ) {
-				throw new Error( `${section}.model: must be "provider/model", got "${obj.model}"` );
-			}
-			profile.model = obj.model;
-		}
-
-		if( undefined !== obj.variant ) {
-			assertString( obj.variant, `${section}.variant`, true );
-			profile.variant = obj.variant;
-		}
-
-		if( undefined !== obj.prompt ) {
-			assertString( obj.prompt, `${section}.prompt`, true ); // allow empty — replaces default
-			profile.prompt = obj.prompt;
-		}
-
-		if( undefined !== obj.temperature ) {
-			assertFiniteNumber( obj.temperature, `${section}.temperature` );
-			profile.temperature = obj.temperature;
-		}
-
-		if( undefined !== obj.top_p ) {
-			assertFiniteNumber( obj.top_p, `${section}.top_p` );
-			profile.top_p = obj.top_p;
-		}
-
-		if( undefined !== obj.options ) {
-			assertValidOptions( obj.options, `${section}.options` );
-			profile.options = structuredClone( obj.options ) as Record<string, unknown>;
-		}
-
-		if( undefined !== obj.failureThreshold ) {
-			assertFiniteNumber( obj.failureThreshold, `${section}.failureThreshold` );
-			if( !Number.isInteger( obj.failureThreshold ) || ( 1 > obj.failureThreshold ) ) {
-				throw new Error( `${section}.failureThreshold: must be a positive integer` );
-			}
-			profile.failureThreshold = obj.failureThreshold;
-		}
-
-		returnValue = profile;
-	} else if( undefined === value ) {
-		returnValue = {};
-	} else if( null === value ) {
-		throw new Error( `${section}: must be a non-array object when present; got null` );
-	} else {
-		throw new Error( `${section}: must be a non-array object when present` );
-	}
-
-	return returnValue;
-}
-
-// ── Model resolution ───────────────────────────────────────────────────────
-
-function resolveModel(
-	profileModel: Undefinedable<string>,
-	pluginCfg: Undefinedable<PluginConfig>,
-): Undefinedable<string> {
-	let returnValue: Undefinedable<string>;
-
-	if( undefined !== profileModel ) {
-		returnValue = profileModel;
-	} else {
-		const planModel: unknown = pluginCfg?.agent?.plan?.model;
-
-		if( "string" === typeof planModel && planModel.includes( "/" ) ) {
-			returnValue = planModel;
-		} else if( "string" === typeof pluginCfg?.model && pluginCfg.model.includes( "/" ) ) {
-			returnValue = pluginCfg.model;
-		} else {
-			returnValue = undefined;
-		}
-	}
-
-	return returnValue;
-}
-
-// ── Agent config builder ───────────────────────────────────────────────────
-
-function buildAgentConfig(
-	profile: Profile,
-	defaultPrompt: string,
-	pluginCfg: Undefinedable<PluginConfig>,
-): Record<string, unknown> {
-	const model: string = resolveModel( profile.model, pluginCfg ) ?? defaultModel;
-
-	const agentCfg: Record<string, unknown> = {
-		model,
-		prompt: profile.prompt ?? defaultPrompt,
-		temperature: profile.temperature ?? 0,
-		mode: "subagent",
-		hidden: true,
-		tools: { ...fixedTools },
-	};
-
-	if( undefined !== profile.top_p ) {
-		agentCfg.top_p = profile.top_p;
-	}
-
-	if( undefined !== profile.variant ) {
-		agentCfg.variant = profile.variant;
-	}
-
-	if( undefined !== profile.options ) {
-		agentCfg.options = structuredClone( profile.options );
-	}
-
-	// Set permission policy. Property order matters.
-	agentCfg.permission = { ...fixedPermission };
-
-	return agentCfg;
-}
-
-// ── Recursion guards ───────────────────────────────────────────────────────
-
-let inAdvisorCall: boolean = false;
-
-// ── Transcript helpers ─────────────────────────────────────────────────────
-
-function formatTranscript(
-	messages: Array<{ info: { role: string; id: string }; parts: Array<{ type: string; text?: string }> }>,
-	excludeID?: string,
-): string {
-	return messages
-		.filter( ( m: { info: { role: string; id: string }; parts: Array<{ type: string; text?: string }> } ): boolean => m.info.id !== excludeID )
-		.map( ( m: { info: { role: string; id: string }; parts: Array<{ type: string; text?: string }> } ): string => {
-			const text: string = m.parts
-				.filter( ( p: { type: string; text?: string } ): boolean => "text" === p.type )
-				.map( ( p: { type: string; text?: string } ): string => p.text ?? "" )
-				.join( "" );
-			const role: string = "user" === m.info.role ? "User" : "Assistant";
-			return `${role}: ${text}`;
-		} )
-		.filter( ( s: string ): boolean => {
-			const afterColon: number = s.indexOf( ": " );
-			return ( -1 !== afterColon ) && ( s.length > ( afterColon + 2 ) );
-		} )
-		.join( "\n\n" );
-}
-
-// Used for session.prompt body (accepts TextPartInput).
-function textPart( t: string ): TextPartInput {
-	return { type: "text", text: t };
-}
-
-// ── Event state types ──────────────────────────────────────────────────────
-
-interface FailureDetail {
-	tool: string;
-	error: string;
-}
-
-interface SessionState {
-	count: number;
-	failures: Array<FailureDetail>;
-	triggered: boolean;
-	intervening: boolean;
-	awaitingIdle: boolean;
-	idle: boolean;
-	idleGeneration: number;
-	deleted: boolean;
-	sourceAgent: string;
-	advice: string;
-}
-
-function createSessionState(): SessionState {
-	return {
-		count: 0,
-		failures: [],
-		triggered: false,
-		intervening: false,
-		awaitingIdle: false,
-		idle: false,
-		idleGeneration: 0,
-		deleted: false,
-		sourceAgent: "",
-		advice: "",
-	};
-}
-
-// ── Plugin factory ─────────────────────────────────────────────────────────
-
-export const AdvisorPlugin: Plugin = async ( { client }, rawOptions ) => {
-	const advisorProfile: Profile = parseProfile( rawOptions, "plugin options" );
-	const failureThreshold: number = advisorProfile.failureThreshold ?? defaultFailureThreshold;
-
-	// Factory-local event state (isolated per plugin instance)
-	const advisorSessions: Set<string> = new Set();
-	const sessionStates: Map<string, SessionState> = new Map();
-	let resolvedCfg: Undefinedable<PluginConfig>;
-
-	// ── Shared advisor lifecycle ───────────────────────────────────────────
-
-	async function _callAdvisor( transcript: string ): Promise<string> {
-		let returnValue: string;
-		const createRes: { data?: { id?: string } } = await client.session.create( {
-			body: { title: "advisor-subcall" },
-		} );
-		const tempID: Undefinedable<string> = createRes.data?.id;
-
-		if( !tempID ) {
-			returnValue = "Advisor error: failed to create ephemeral session.";
-		} else {
-			advisorSessions.add( tempID );
-			try {
-				const response: { data?: { parts?: Array<{ type: string; text?: string }> } } = await client.session.prompt( {
-					path: { id: tempID },
-					body: {
-						agent: advisorAgent,
-						parts: [ textPart( transcript ) ],
-					},
-				} );
-
-				const text: Undefinedable<string> = response.data?.parts
-					?.filter( ( p: { type: string; text?: string } ): p is TextPart => "text" === p.type )
-					.map( ( p: TextPart ): string => p.text )
-					.join( "\n" );
-
-				returnValue = text || "Advisor returned no advice.";
-			} finally {
-				advisorSessions.delete( tempID );
-				await client.session
-					.delete( { path: { id: tempID } } )
-					.catch( () => { /* ignore cleanup failure */ } );
-			}
-		}
-
-		return returnValue;
-	}
-
-	// ── Intervention orchestration ─────────────────────────────────────────
-
-	function _maybeResume( sessionID: string, state: SessionState ): void {
-		if( !state.deleted && state.intervening && state.idle && state.sourceAgent && state.advice ) {
-			state.intervening = false;
-			state.awaitingIdle = false;
-			// Fire-and-forget: never block event bus on prompt
-			client.session.prompt( {
-				path: { id: sessionID },
-				body: {
-					agent: state.sourceAgent,
-					parts: [ textPart( state.advice + "\n\nContinue the task using this advice." ) ],
-				},
-			} ).catch( () => { /* swallow resume rejection */ } );
-		}
-	}
-
-	async function _launchIntervention(
-		sessionID: string,
-		messageID: string,
-		state: SessionState,
-	): Promise<void> {
-		// Step 1: fetch messages to resolve source agent
-		let msgs: Undefinedable<Array<{ info: { role: string; id: string }; parts: Array<{ type: string; text?: string }> }>>;
-		let fetchOk: boolean = true;
+	async function consult(sourceID:string, messageID:string, signal:AbortSignal) {
+		let sessionID: string | undefined;
+		let creation: ReturnType<typeof ctx.session.create> | undefined;
+		let admission: ReturnType<typeof ctx.session.prompt> | undefined;
+		let completed=false, content='', eventError: unknown;
+		const events=new AbortController();
+		let reader: Promise<void> | undefined;
+		const warnings: string[]=[];
 		try {
-			const msgsRes: { data?: Array<{ info: { role: string; id: string }; parts: Array<{ type: string; text?: string }> }> } = await client.session.messages( {
-				path: { id: sessionID },
-			} );
-			msgs = msgsRes.data;
-		} catch {
-			fetchOk = false;
-		}
-
-		if( fetchOk && msgs ) {
-			// Resolve source agent: assistant message messageID → parentID → user message → agent
-			let assistantMsgInfo: Undefinedable<{ info: { role: string; id: string }; parts: Array<{ type: string; text?: string }> }>;
-			let userMsgInfo: Undefinedable<{ info: { role: string; id: string; agent?: string }; parts: Array<{ type: string; text?: string }> }>;
-			let parentID: Undefinedable<string>;
-
-			for( const msg of msgs ) {
-				if( "assistant" === msg.info.role && msg.info.id === messageID ) {
-					assistantMsgInfo = msg;
-					break;
-				}
-			}
-
-			if( assistantMsgInfo ) {
-				parentID = ( assistantMsgInfo.info as { role: string; id: string; parentID?: string } ).parentID;
-			}
-
-			if( parentID ) {
-				for( const msg of msgs ) {
-					if( "user" === msg.info.role && msg.info.id === parentID ) {
-						userMsgInfo = msg as { info: { role: string; id: string; agent?: string }; parts: Array<{ type: string; text?: string }> };
-						break;
-					}
-				}
-			}
-
-			const sourceAgent: string = userMsgInfo?.info?.agent ?? "";
-
-			if( sourceAgent ) {
-				// Check eligibility: tools.advisor must not be explicitly false
-				let agentEligible: boolean = true;
-				if( resolvedCfg?.agent?.[ sourceAgent ]?.tools?.advisor === false ) {
-					agentEligible = false;
-				}
-
-				if( agentEligible ) {
-					state.sourceAgent = sourceAgent;
-
-					// Step 2: abort the session (awaitingIdle set only after success)
-					let abortOk: boolean = false;
-					try {
-						const abortRes: { data?: boolean } = await client.session.abort( {
-							path: { id: sessionID },
-						} );
-						abortOk = true === abortRes.data;
-					} catch {
-						abortOk = false;
-					}
-
-					if( abortOk ) {
-						// Step 3: start post-abort idle-wait phase
-						state.awaitingIdle = true;
-						state.idle = false;
-
-						// Step 4: check current status to close idle-before-wait race.
-						// Capture generation before async query so a concurrent event
-						// (idle, busy, retry) can invalidate a stale query result.
-						const capturedGeneration: number = state.idleGeneration;
-						try {
-							const statusRes: { data?: Record<string, SessionStatus> } = await client.session.status();
-							// Only apply query result if no event advanced the generation
-							if( capturedGeneration === state.idleGeneration ) {
-								const sessStatus: Undefinedable<SessionStatus> = statusRes.data?.[ sessionID ];
-								if( sessStatus ) {
-									state.idle = ( "idle" === sessStatus.type );
-								} else {
-									state.idle = false;
-								}
+			checked(signal);
+			const messages=await abortable(ctx.session.context({sessionID:sourceID},{signal}),signal);
+			const text=transcript(messages,messageID);
+			if(!text.trim()) return {content:'Advisor declined: no prior conversation to analyze.'};
+			const source=await abortable(ctx.session.get({sessionID:sourceID},{signal}),signal);
+			if(source.agent===advisorAgent) throw Error('Advisor cannot be called recursively');
+			checked(signal);
+			creation=ctx.session.create({title:'advisor-subcall',agent:advisorAgent,model:options.model,
+				location:source.location,permissions:permissions()},{signal});
+			// Capture ownership even if cancellation wins the race with the create response.
+			creation.then(session=>{sessionID=session.id;consultantSessions.add(session.id);},()=>{});
+			const session=await abortable(creation,signal); sessionID=session.id;
+			checked(signal);
+			let terminal: 'succeeded'|'failed'|'interrupted'|undefined;
+			reader=(async()=>{
+				try {for await(const event of ctx.event.subscribe({signal:events.signal})) {
+					if(!('sessionID' in event.data)) continue;
+					if(event.data.sessionID===sourceID && event.type==='session.deleted') throw Error('source session deleted');
+					if(event.data.sessionID!==sessionID) continue;
+					if(event.type==='session.deleted') throw Error('consultant session deleted');
+					if(event.type==='session.execution.succeeded') terminal='succeeded';
+					if(event.type==='session.execution.failed') terminal='failed';
+					if(event.type==='session.execution.interrupted') terminal='interrupted';
+				}}
+				catch(error){if(!events.signal.aborted) eventError=error;}
+			})();
+			admission=ctx.session.prompt({sessionID,text},{signal});
+			const input=await abortable(admission,signal);
+			while(true) {
+				checked(signal); if(eventError) throw eventError;
+				if(terminal==='failed'||terminal==='interrupted') throw Error(`Advisor execution ${terminal}`);
+				{
+					const output=await abortable(ctx.session.context({sessionID},{signal}),signal);
+					const boundary=output.findIndex(m=>m.type==='user' && m.id===input.id);
+					if(boundary>=0) {
+						const tail=output.slice(boundary+1);
+						if(tail.some(m=>m.type==='user')) throw Error('Advisor input correlation lost: another user turn was admitted');
+						const idle=tail.findIndex(m=>m.type==='idle');
+						if(idle>=0) {
+							const end=tail[idle];
+							if(end.type==='idle' && end.outcome!=='succeeded') throw Error(`Advisor execution ${end.outcome}`);
+							const responses=tail.slice(0,idle).filter(m=>m.type==='assistant' && m.agent===advisorAgent);
+							if(responses.some(m=>m.type==='assistant' && m.error)) throw Error('Advisor assistant failed');
+							if(responses.every(m=>m.type==='assistant' && m.time.completed!==undefined)) {
+								content=responses.flatMap(m=>m.type==='assistant'?m.content.filter(p=>p.type==='text').map(p=>p.text):[]).join('\n').trim();
+								completed=true;content ||= 'Advisor returned no advice.';break;
 							}
-						} catch {
-							// non-idle, wait for event; generation unchanged, no event lost
 						}
-
-						// Step 5: build advisor input with failure context
-						const transcript: string = formatTranscript( msgs, "" );
-						const failureBlock: string = state.failures
-							.map( ( f: FailureDetail ): string => `Tool: ${f.tool}\nError: ${f.error}` )
-							.join( "\n\n" );
-
-						const advisorInput: string = transcript
-							? `${transcript}\n\n--- Recent tool failures ---\n${failureBlock}`
-							: `--- Tool failures ---\n${failureBlock}\n\nContinue the task reassessing the approach.`;
-
-						// Step 6: call advisor
-						let advice: string;
-						try {
-							const rawAdvice: string = await _callAdvisor( advisorInput );
-							// Manual-facing unusable strings must be replaced with fallback for auto path
-							if( "Advisor returned no advice." === rawAdvice || "Advisor error: failed to create ephemeral session." === rawAdvice ) {
-								advice = "Reassess the failed approach and continue working.";
-							} else {
-								advice = rawAdvice;
-							}
-						} catch {
-							advice = "Reassess the failed approach and continue working.";
-						}
-						state.advice = advice;
-
-						// Step 7: attempt resume
-						_maybeResume( sessionID, state );
-					} else {
-						// Abort failed, clear intervening but keep triggered latched
-						state.intervening = false;
 					}
-				} else {
-					// Agent opted out, clear intervention
-					state.intervening = false;
 				}
-			} else {
-				// No source agent resolvable, clear intervention
-				state.intervening = false;
+				await pause(signal);
 			}
-		} else {
-			// Messages unavailable, clear intervention
-			state.intervening = false;
+		} catch(error) {content=`Advisor error: ${errorText(error)}`;}
+		finally {
+			events.abort();
+			if(reader) try {await bounded(()=>reader!);} catch(error){warnings.push(`event reader: ${errorText(error)}`);}
+			// Native methods accept request signals, but a host may settle after abort.
+			// Join pending admission/create within a separate bounded cleanup budget.
+			if(!sessionID && creation) try {await bounded(()=>creation!);} catch(error){
+				warnings.push(`create settlement: ${errorText(error)}`);
+				void creation.then(async late=>{await cleanupSession(late.id,true);consultantSessions.delete(late.id);},()=>{});
+			}
+			if(admission && signal.aborted) try {await bounded(()=>admission!);} catch(error){
+				warnings.push(`prompt settlement: ${errorText(error)}`);
+				const ownedID=sessionID;
+				if(ownedID) void admission.then(()=>cleanupSession(ownedID,true),()=>{});
+			}
+			if(sessionID) {warnings.push(...await cleanupSession(sessionID,!completed));consultantSessions.delete(sessionID);}
 		}
+		return {content:content+(warnings.length ? `\n\nAdvisor cleanup warning: ${warnings.join('; ')}`:'')};
 	}
-
-	// ── Plugin hooks ───────────────────────────────────────────────────────
-
-	return {
-		config: async ( cfg: PluginConfig ): Promise<void> => {
-			resolvedCfg = cfg;
-
-			const advisorCfg: Record<string, unknown> = buildAgentConfig( advisorProfile, advisorDefaultPrompt, cfg );
-
-			// cfg.agent uses an index signature allowing arbitrary agent names
-			const agents: NonNullable<PluginConfig[ "agent" ]> = cfg.agent ?? {};
-			agents[ advisorAgent ] = advisorCfg as ( typeof agents )[ string ];
-			cfg.agent = agents;
-		},
-
-		event: async ( { event }: { event: Event } ): Promise<void> => {
-			if( "message.part.updated" === event.type ) {
-				const part: Part = event.properties.part;
-				if( "tool" === part.type && !advisorSessions.has( part.sessionID ) ) {
-					const sessionID: string = part.sessionID;
-					let state: Undefinedable<SessionState> = sessionStates.get( sessionID );
-
-					if( state && state.intervening ) {
-						// Skip all tool events during intervention
-					} else if( "error" === part.state.status ) {
-						// Ignore advisor tool errors to prevent recursion
-						if( "advisor" !== part.tool ) {
-							if( !state ) {
-								state = createSessionState();
-								sessionStates.set( sessionID, state );
-							}
-
-							// Keep failures bounded to threshold
-							if( state.failures.length >= failureThreshold ) {
-								state.failures.shift();
-							}
-							state.failures.push( { tool: part.tool, error: part.state.error } );
-							state.count = state.failures.length;
-
-							if( state.count >= failureThreshold && !state.triggered ) {
-								state.triggered = true;
-								state.intervening = true;
-								void _launchIntervention( sessionID, part.messageID, state );
-							}
-						}
-					} else if( "completed" === part.state.status ) {
-						// Completed tool resets the streak
-						if( !state ) {
-							state = createSessionState();
-							sessionStates.set( sessionID, state );
-						}
-						state.count = 0;
-						state.failures = [];
-						state.triggered = false;
-					}
-				}
-			} else if( "session.idle" === event.type ) {
-				const sessID: string = event.properties.sessionID;
-				const state: Undefinedable<SessionState> = sessionStates.get( sessID );
-				if( state && state.awaitingIdle ) {
-					state.idleGeneration++;
-					state.idle = true;
-					_maybeResume( sessID, state );
-				}
-			} else if( "session.status" === event.type ) {
-				const sessID: string = event.properties.sessionID;
-				const state: Undefinedable<SessionState> = sessionStates.get( sessID );
-				if( state && state.awaitingIdle ) {
-					if( "idle" === event.properties.status.type ) {
-						state.idleGeneration++;
-						state.idle = true;
-						_maybeResume( sessID, state );
-					} else if( "busy" === event.properties.status.type || "retry" === event.properties.status.type ) {
-						state.idleGeneration++;
-						state.idle = false;
-					}
-				}
-			} else if( "session.deleted" === event.type ) {
-				const sessID: string = event.properties.info.id;
-				const state: Undefinedable<SessionState> = sessionStates.get( sessID );
-				if( state ) {
-					state.deleted = true;
-				}
-				sessionStates.delete( sessID );
-			}
-		},
-
-		tool: {
-			advisor: tool( {
-				description: advisorToolDescription,
-				args: {},
-				async execute( _args: Record<string, never>, context: { sessionID: string; messageID: string } ): Promise<string> {
-					let returnValue: string;
-
-					if( inAdvisorCall ) {
-						returnValue = "Error: advisor tool cannot be called recursively.";
-					} else {
-						const sessionID: string = context.sessionID;
-						const messageID: string = context.messageID;
-
-						try {
-							inAdvisorCall = true;
-
-							const { data: messages }: { data: Undefinedable<Array<{ info: { role: string; id: string }; parts: Array<{ type: string; text?: string }> }>> } = await client.session.messages( {
-								path: { id: sessionID },
-							} );
-
-							const transcript: string = formatTranscript( messages ?? [], messageID );
-
-							if( !transcript ) {
-								returnValue = "Advisor declined: no prior conversation to analyze.";
-							} else {
-								returnValue = await _callAdvisor( transcript );
-							}
-						} catch( err: unknown ) {
-							returnValue = `Advisor error: ${String( err )}`;
-						} finally {
-							inAdvisorCall = false;
-						}
-					}
-
-					return returnValue;
-				},
-			} ),
-		},
+	try {
+		registrations.push(await ctx.agent.transform(editor=>editor.update(advisorAgent, agent=>{
+			agent.mode='subagent'; agent.hidden=true; agent.system=options.prompt;
+			agent.model=options.model; agent.permissions=permissions();
+		})));
+		registrations.push(await ctx.session.hook('context', event=>{
+			if(event.agent !== advisorAgent) return;
+			event.options.temperature=options.temperature;
+			if(options.topP !== undefined) event.options.topP=options.topP;
+			for(const name of Object.keys(event.tools)) if(!safeTools.has(name)) delete event.tools[name];
+		}));
+		registrations.push(await ctx.tool.transform(editor=>editor.add({
+			name:'advisor',description,options:{codemode:false},
+			input:{type:'object',properties:{},additionalProperties:false},
+			execute(_input, context){
+				if(unloaded) return Promise.resolve({content:'Advisor unavailable: plugin unloaded.'});
+				if(context.agent===advisorAgent || consultantSessions.has(context.sessionID)) return Promise.resolve({content:'Advisor cannot be called recursively.'});
+				if(calls.has(context.sessionID)) return Promise.resolve({content:'Advisor consultation already in progress for this session.'});
+				const controller=new AbortController();
+				const cancel=()=>controller.abort(Error('Advisor cancelled'));
+				context.signal.addEventListener('abort',cancel,{once:true});if(context.signal.aborted) cancel();
+				const timer=setTimeout(()=>controller.abort(Error('Advisor timed out')),options.timeoutMs);
+				const done=consult(context.sessionID,context.messageID,controller.signal).finally(()=>{
+					clearTimeout(timer);context.signal.removeEventListener('abort',cancel);calls.delete(context.sessionID);
+				});
+				calls.set(context.sessionID,{controller,done});return done;
+			},
+		})));
+	} catch(error) {await Promise.all(registrations.map(r=>r.dispose())); throw error;}
+	return async()=>{
+		unloaded=true;
+		for(const call of calls.values()) call.controller.abort(Error('Advisor cancelled: plugin unloaded'));
+		await Promise.allSettled([...calls.values()].map(call=>call.done));
+		const disposed=await Promise.allSettled(registrations.map(r=>r.dispose()));
+		const failed=disposed.filter(r=>r.status==='rejected');
+		if(failed.length) throw Error(`Advisor disposal failed: ${failed.map(r=>errorText(r.reason)).join('; ')}`);
 	};
-};
-
-export default AdvisorPlugin;
+} };
+export default plugin;

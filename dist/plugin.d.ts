@@ -1,4 +1,3 @@
-import type { Plugin } from "@opencode-ai/plugin";
-export type Undefinedable<T> = T | undefined;
-export declare const AdvisorPlugin: Plugin;
-export default AdvisorPlugin;
+import type { Plugin } from '@opencode/plugin';
+declare const plugin: Plugin.Plugin;
+export default plugin;

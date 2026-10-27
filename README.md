@@ -2,6 +2,10 @@
 
 Adds an `advisor()` tool to OpenCode. The tool consults a hidden internal agent with fixed read-only permissions.
 
+> **Fork:** This repository is a fork of
+> [StefanoBalocco/opencode-advisor](https://github.com/StefanoBalocco/opencode-advisor),
+> adapted for OpenCode v2. Upstream remains the original project; see [License](#license).
+
 ## Install
 
 Add the package to the `plugin` array in `opencode.json`:
