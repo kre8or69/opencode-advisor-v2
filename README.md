@@ -8,54 +8,55 @@ Adds an `advisor()` tool to OpenCode. The tool consults a hidden internal agent 
 
 ## Install
 
-Add the package to the `plugin` array in `opencode.json`:
+Clone this repository and reference the plugin directory from the v2 `plugins` array in `opencode.json`:
 
 ```json
 {
-  "plugin": ["@stefanobalocco/opencode-advisor"]
+  "plugins": [
+    { "package": "/absolute/path/to/opencode-advisor-v2" }
+  ]
 }
 ```
+
+The `package` path must be absolute and point at the checkout. This fork's package is local and private; it is not published to npm.
 
 The plugin works without options.
 
 ## Configuration
 
-Pass an optional profile object in the plugin tuple:
+Pass options under the plugin entry's `options` object:
 
 ```json
 {
-  "plugin": [
-    ["@stefanobalocco/opencode-advisor", { "model": "anthropic/claude-opus-4-7", "temperature": 0 }]
+  "plugins": [
+    {
+      "package": "/absolute/path/to/opencode-advisor-v2",
+      "options": {
+        "model": "anthropic/claude-opus-4-7",
+        "variant": "high",
+        "temperature": 0
+      }
+    }
   ]
 }
 ```
 
 ### Model resolution
 
-The plugin uses the first available model, in this order:
-
-1. The profile's `model` field.
-2. `agent.plan.model` in the OpenCode configuration.
-3. The global OpenCode `model` field.
-4. The `deepseek/deepseek-v4-pro` fallback.
-
-The `model` field must use `provider/model` format with non-empty provider and model segments.
+The plugin uses the `model` option, or the `deepseek/deepseek-v4-pro` fallback when it is omitted. The `model` field must use `provider/model` format with non-empty provider and model segments. An optional `#variant` suffix is supported; the separate `variant` option overrides it.
 
 ### Profile fields
 
 | Field | Type | When omitted |
 | --- | --- | --- |
-| `model` | `"provider/model"` | Uses the resolution order above. |
-| `variant` | string | Not set. |
+| `model` | `"provider/model"` (optional `#variant`) | `deepseek/deepseek-v4-pro` |
+| `variant` | string | Uses the `model` suffix, if present. |
 | `prompt` | string | Uses the built-in system prompt. |
 | `temperature` | finite number | `0` |
 | `top_p` | finite number | Not set. |
-| `options` | JSON-safe object | Not set. |
-| `failureThreshold` | positive integer | `3` |
+| `timeoutMs` | positive, timer-safe integer | `120000` |
 
-A supplied `prompt` replaces the built-in system prompt. The `options` object accepts JSON-safe values, including null, booleans, finite numbers, strings, arrays, and nested plain objects. Use it for provider-specific settings such as `reasoningEffort`.
-
-The plugin does not read environment variables. Configure it through the plugin tuple.
+A supplied `prompt` replaces the built-in system prompt. Unknown options are rejected at startup. The plugin does not read environment variables; configure it through the plugin entry's `options` object.
 
 ## Fixed permissions
 
@@ -72,19 +73,7 @@ The hidden agent uses this non-configurable permission policy:
 | `edit` | deny |
 | All other tools | deny |
 
-Only these Bash commands are allowed:
-
-| Command pattern | Policy |
-| --- | --- |
-| `wc *` | allow |
-| `git log *` | allow |
-| `git diff *` | allow |
-| `git show *` | allow |
-| `rtk wc *` | allow |
-| `rtk git log *` | allow |
-| `rtk git diff *` | allow |
-| `rtk git show *` | allow |
-| All other Bash commands | deny |
+The `shell` action is denied, so the hidden agent cannot run any shell command, including `git` or `wc`.
 
 This policy cannot be overridden. The hidden agent cannot write files, use LSP, invoke tasks or todos, access MCP tools, or run arbitrary shell commands.
 
@@ -102,55 +91,21 @@ The hidden agent can inspect the workspace and public web with read-only tools. 
 
 ## Topic labels
 
-`advisor()` accepts an optional `topic` argument. Pass a one-line summary of the question or decision so the tool card and the hidden consultant's session are labelled:
+`advisor()` accepts an optional `topic` argument. The topic is stored in the tool result metadata as the consultation title and is used for the hidden consultant session title. The TUI may also render the topic as the tool input:
 
 ```json
 { "topic": "choosing between A and B" }
 ```
 
-The topic is for display only and does not change the transcript or the advice. Whitespace is collapsed to a single line, and topics longer than 120 characters are truncated with an ellipsis. When `topic` is omitted, the card shows `Advisor — consulting…` and the consultant session is named `advisor — consulting`.
+The topic is for display only and does not change the transcript or the advice. Whitespace is collapsed to a single line, and topics longer than 120 characters are truncated with an ellipsis. When `topic` is omitted, the title is `Advisor — consulting…` and the consultant session is named `advisor — consulting`.
 
-## Auto-escalation (failureThreshold)
+## Not implemented in this v2 port
 
-The plugin monitors tool executions and can automatically consult the advisor when a session encounters repeated errors. This feature helps the source agent recover from a failing approach without manual intervention.
-
-### Configuration
-
-Set `failureThreshold` to the number of consecutive tool errors that trigger auto-escalation:
-
-```json
-{ "failureThreshold": 3 }
-```
-
-Default is `3`. Must be a positive integer.
-
-### How auto-escalation works
-
-1. The plugin counts consecutive terminal tool errors per session.
-2. A terminal `completed` tool event resets the counter to zero.
-3. When the threshold is reached, the plugin:
-   - Aborts the failing session.
-   - Resolves the source agent from the conversation.
-   - Creates an ephemeral advisor session with the failure context (tool names + error messages).
-   - Waits for the session to become idle.
-   - Resumes the source agent in a new turn with the advisor's guidance.
-4. Only one intervention fires per streak. A completed tool after the resume re-arms the feature.
-5. `pending` and `running` tool states are ignored.
-
-### Restrictions
-
-- Per-agent opt-out: set `"tools": { "advisor": false }` for any agent in `opencode.json` to prevent auto-escalation for that agent.
-- The plugin ignores tool events from its own ephemeral advisor sessions to prevent infinite recursion.
-- The `advisor()` tool itself never triggers escalation — only non-advisor tool errors count.
-- If the session is deleted during an intervention, the resume is cancelled.
-- Abort cancels the current agent turn. Already terminal tool records remain; running work may stop after partial external side effects.
-- If abort fails, or the source session never reports post-abort idle, no resume is sent and the streak remains latched until a successful tool resets it.
-- No automatic retry, timer, or queue is used for the escalation lifecycle.
-- The advisor tool result card is not used for automatic feedback. OpenCode does not expose programmatic custom-tool invocation; the feedback is a normal session prompt, not a tool-result insertion.
+The manual v2 port does not implement auto-escalation. The `failureThreshold` option is rejected by the option parser; `advisor()` runs only when the caller invokes it explicitly.
 
 ## Requirements
 
-- OpenCode >= 1.4.9
+- OpenCode 2.1.4
 - Provider authentication configured through `/connect` in OpenCode
 
 ## Development
@@ -161,7 +116,7 @@ npm run build
 npm run tests
 ```
 
-The build compiles `src/plugin.ts` and `tests/src/plugin.test.ts` to JavaScript. The published package entry is `dist/plugin.js`.
+The build compiles `src/plugin.ts` and `tests/src/plugin.test.ts` to JavaScript. The package entry is `dist/plugin.js`.
 
 ## License
 

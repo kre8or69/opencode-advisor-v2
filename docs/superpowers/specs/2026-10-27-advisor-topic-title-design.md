@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-27
 **Repo:** `opencode-advisor-v2` (fork of `StefanoBalocco/opencode-advisor`, MIT)
-**Status:** proposed — awaiting approval
+**Status:** approved and implemented
 
 ## Intent
 

@@ -46,7 +46,7 @@
   - `consultantTitle(topic: string | undefined): string`
   - `consult(sourceID: string, messageID: string, signal: AbortSignal, topic?: string)`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/native.test.js`, add `progress: []` to the `host()` return object and pass a progress spy into the tool context. Change `run` to accept an input:
 
@@ -98,12 +98,12 @@ t.deepEqual(h.tools.advisor.input, {
 });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npm run build && npm run tests`
 Expected: FAIL — the schema has no `topic` property, `progress` is never called, and `metadata` is undefined.
 
-- [ ] **Step 3: Implement the topic helpers and plumbing**
+- [x] **Step 3: Implement the topic helpers and plumbing**
 
 In `src/plugin.ts`, add near `parseModel`:
 
@@ -157,16 +157,16 @@ Add one line to the `description` constant:
 Pass a short "topic" summarizing the question (for example, "choosing between A and B") so the UI can label the consultation. It is for display only.
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `npm run build && npm run tests`
 Expected: PASS — all existing tests plus the three new topic tests.
 
-- [ ] **Step 5: Update the README**
+- [x] **Step 5: Update the README**
 
 Add a short “Topic labels” section documenting the optional `topic` argument and the fallback.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/plugin.ts tests/native.test.js dist/plugin.js dist/plugin.d.ts dist/plugin.js.map README.md
@@ -185,7 +185,7 @@ git commit -m "feat: label advisor consultations with an optional topic"
 - Consumes: the built `dist/plugin.js` from Task 1.
 - Produces: identical vendored builds in both profiles.
 
-- [ ] **Step 1: Build and hash the source artifact**
+- [x] **Step 1: Build and hash the source artifact**
 
 ```bash
 cd /projects/opencode-advisor-v2
@@ -193,7 +193,7 @@ npm run build
 sha256sum dist/plugin.js
 ```
 
-- [ ] **Step 2: Copy to both profiles**
+- [x] **Step 2: Copy to both profiles**
 
 ```bash
 for p in home work; do
@@ -206,11 +206,11 @@ sha256sum "$HOME/.config/opencode-profiles/"*/local-plugins/opencode-advisor-v2/
 
 Expected: three identical hashes (source, home-v2, work-v2).
 
-- [ ] **Step 3: Manual TUI check (user gate)**
+- [x] **Step 3: Manual TUI check (user gate)**
 
 Open `och` and `ocw`, have the agent call `advisor` with a topic, and confirm the card reads `Advisor — <topic>` (or the prefix the TUI actually needs). If the TUI prefixes the tool name itself, drop the `Advisor — ` prefix from `advisorTitle` and re-run Task 1’s tests.
 
-- [ ] **Step 4: Commit and push**
+- [x] **Step 4: Commit and push**
 
 ```bash
 git add dist/plugin.js dist/plugin.d.ts dist/plugin.js.map
