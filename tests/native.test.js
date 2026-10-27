@@ -15,7 +15,7 @@ function host(options = {}) {
 	const transcripts = new Map();
 	const queues = new Set();
 	const register = async callback => {callback(); return {dispose:async()=>{disposed++;}};};
-	const h = {calls, agents, hooks, tools, transcripts,
+	const h = {calls, agents, hooks, tools, transcripts, progress:[],
 		get disposed(){return disposed;}, get subscriptions(){return subscriptions;},
 		source:[user('msg_u','Objective'), assistant('msg_previous','Prior advice'), assistant('msg_current','Excluded')],
 		ctx:{ options,
@@ -49,7 +49,11 @@ function host(options = {}) {
 			h.emit(`session.execution.${outcome}`,sessionID);
 		},
 		async setup(){h.cleanup=await plugin.setup(h.ctx);},
-		run(sessionID='ses_source', extra={}){return tools.advisor.execute({}, {sessionID,messageID:'msg_current',agent:'build',signal:new AbortController().signal,...extra});},
+		run(sessionID='ses_source', extra={}, input={}){
+			return tools.advisor.execute(input, {sessionID,messageID:'msg_current',agent:'build',
+				signal:new AbortController().signal,
+				progress:async update=>{h.progress.push(update);},...extra});
+		},
 	}; return h;
 }
 
@@ -58,7 +62,7 @@ for(const [model,variant] of [['ollama-cloud/kimi-k3','max'],['openai/gpt-6.1-so
 		const h=host({model,variant,temperature:0.4,top_p:0.8}); await h.setup();
 		t.deepEqual(h.agents[agentID].model,{providerID:model.split('/')[0],id:model.split('/')[1],variant});
 		t.true(h.agents[agentID].hidden); t.is(h.agents[agentID].mode,'subagent');
-		t.false(h.tools.advisor.options.codemode); t.deepEqual(h.tools.advisor.input,{type:'object',properties:{},additionalProperties:false});
+		t.false(h.tools.advisor.options.codemode); t.deepEqual(h.tools.advisor.input,{type:'object',properties:{topic:{type:'string',description:'One-line summary of the question or decision, for display only.'}},additionalProperties:false});
 		t.regex(h.tools.advisor.description,/active.*context/i);
 		const e={agent:agentID,options:{},tools:Object.fromEntries(['read','glob','grep','webfetch','websearch','skill','shell','advisor','edit','mcp_read','subagent'].map(k=>[k,{}]))};
 		await h.hooks.context(e); t.deepEqual(Object.keys(e.tools),['read','glob','grep','webfetch','websearch','skill']);
@@ -67,6 +71,31 @@ for(const [model,variant] of [['ollama-cloud/kimi-k3','max'],['openai/gpt-6.1-so
 		await h.cleanup(); t.is(h.disposed,3);
 	});
 }
+
+test('topic labels the consultation card and child session',async t=>{
+	const h=host();await h.setup();
+	const r=await h.run('ses_source',{}, {topic:'  choosing between A\nand B  '});
+	t.is(r.content,'Advice');
+	t.is(r.metadata.title,'Advisor — choosing between A and B');
+	t.deepEqual(h.progress[0],{title:'Advisor — choosing between A and B'});
+	t.is(h.calls.find(c=>c[0]==='create')[1].title,'advisor — choosing between A and B');
+	await h.cleanup();
+});
+test('no topic uses the consulting fallback',async t=>{
+	const h=host();await h.setup();
+	const r=await h.run();
+	t.is(r.metadata.title,'Advisor — consulting…');
+	t.is(h.calls.find(c=>c[0]==='create')[1].title,'advisor — consulting');
+	await h.cleanup();
+});
+test('topic is truncated to one line of 120 characters',async t=>{
+	const h=host();await h.setup();
+	const r=await h.run('ses_source',{}, {topic:'x'.repeat(200)});
+	t.is(r.metadata.title,`Advisor — ${'x'.repeat(119)}…`);
+	t.false(r.metadata.title.includes('\n'));
+	await h.cleanup();
+});
+
 for(const options of [null,[],{foo:1},{options:{}},{failureThreshold:3},{model:'bad'},{variant:3},{prompt:3},{temperature:NaN},{top_p:Infinity},{timeoutMs:0},{timeoutMs:1.5},{timeoutMs:'1'}]){
 	test(`rejects invalid options ${JSON.stringify(options)}`,async t=>{const h=host(options);await t.throwsAsync(()=>h.setup(),{message:/advisor.*(option|model|variant|prompt|temperature|top_p|timeoutMs)/i}); t.is(h.calls.length,0);});
 }

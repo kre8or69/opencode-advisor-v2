@@ -100,6 +100,16 @@ This policy cannot be overridden. The hidden agent cannot write files, use LSP, 
 
 The hidden agent can inspect the workspace and public web with read-only tools. It cannot edit files or run arbitrary shell commands.
 
+## Topic labels
+
+`advisor()` accepts an optional `topic` argument. Pass a one-line summary of the question or decision so the tool card and the hidden consultant's session are labelled:
+
+```json
+{ "topic": "choosing between A and B" }
+```
+
+The topic is for display only and does not change the transcript or the advice. Whitespace is collapsed to a single line, and topics longer than 120 characters are truncated with an ellipsis. When `topic` is omitted, the card shows `Advisor — consulting…` and the consultant session is named `advisor — consulting`.
+
 ## Auto-escalation (failureThreshold)
 
 The plugin monitors tool executions and can automatically consult the advisor when a session encounters repeated errors. This feature helps the source agent recover from a failing approach without manual intervention.

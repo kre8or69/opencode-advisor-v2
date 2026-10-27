@@ -14,7 +14,9 @@ Call it again when the approach stalls, errors recur, results contradict expecta
 
 For tasks longer than a few steps, consult the advisor before choosing an approach and again before completion. Skip it only on short, reactive turns where tool output directly determines the next action.
 
-Give the advice serious weight. Override a specific recommendation only when primary-source evidence disproves it. Present the conflict in another advisor call instead of changing course silently.`;
+Give the advice serious weight. Override a specific recommendation only when primary-source evidence disproves it. Present the conflict in another advisor call instead of changing course silently.
+
+Pass a short "topic" summarizing the question (for example, "choosing between A and B") so the UI can label the consultation. It is for display only.`;
 const safeTools = new Set(['read', 'glob', 'grep', 'webfetch', 'websearch', 'skill']);
 function permissions() {
     return [{ action: '*', resource: '*', effect: 'deny' },
@@ -28,6 +30,22 @@ function parseModel(input, override) {
     const variant = override ?? match[3];
     return { providerID: match[1], id: match[2],
         ...(variant !== undefined ? { variant: variant } : {}) };
+}
+const topicDescription = 'One-line summary of the question or decision, for display only.';
+const topicMaxLength = 120;
+function normalizeTopic(value) {
+    if (typeof value !== 'string')
+        return undefined;
+    const topic = value.replace(/\s+/g, ' ').trim();
+    if (!topic)
+        return undefined;
+    return topic.length > topicMaxLength ? `${topic.slice(0, topicMaxLength - 1)}…` : topic;
+}
+function advisorTitle(topic) {
+    return topic ? `Advisor — ${topic}` : 'Advisor — consulting…';
+}
+function consultantTitle(topic) {
+    return topic ? `advisor — ${topic}` : 'advisor — consulting';
 }
 function parseOptions(raw) {
     if (raw === undefined)
@@ -131,7 +149,7 @@ const plugin = { id: 'opencode-advisor', async setup(ctx) {
             }
             return failures;
         }
-        async function consult(sourceID, messageID, signal) {
+        async function consult(sourceID, messageID, signal, topic) {
             let sessionID;
             let creation;
             let admission;
@@ -149,7 +167,7 @@ const plugin = { id: 'opencode-advisor', async setup(ctx) {
                 if (source.agent === advisorAgent)
                     throw Error('Advisor cannot be called recursively');
                 checked(signal);
-                creation = ctx.session.create({ title: 'advisor-subcall', agent: advisorAgent, model: options.model,
+                creation = ctx.session.create({ title: consultantTitle(topic), agent: advisorAgent, model: options.model,
                     location: source.location, permissions: permissions() }, { signal });
                 creation.then(session => { sessionID = session.id; consultantSessions.add(session.id); }, () => { });
                 const session = await abortable(creation, signal);
@@ -272,21 +290,26 @@ const plugin = { id: 'opencode-advisor', async setup(ctx) {
             }));
             registrations.push(await ctx.tool.transform(editor => editor.add({
                 name: 'advisor', description, options: { codemode: false },
-                input: { type: 'object', properties: {}, additionalProperties: false },
-                execute(_input, context) {
+                input: { type: 'object', properties: { topic: { type: 'string', description: topicDescription } }, additionalProperties: false },
+                async execute(input, context) {
                     if (unloaded)
-                        return Promise.resolve({ content: 'Advisor unavailable: plugin unloaded.' });
+                        return { content: 'Advisor unavailable: plugin unloaded.' };
                     if (context.agent === advisorAgent || consultantSessions.has(context.sessionID))
-                        return Promise.resolve({ content: 'Advisor cannot be called recursively.' });
+                        return { content: 'Advisor cannot be called recursively.' };
                     if (calls.has(context.sessionID))
-                        return Promise.resolve({ content: 'Advisor consultation already in progress for this session.' });
+                        return { content: 'Advisor consultation already in progress for this session.' };
+                    const topic = normalizeTopic(input?.topic);
+                    const title = advisorTitle(topic);
                     const controller = new AbortController();
                     const cancel = () => controller.abort(Error('Advisor cancelled'));
                     context.signal.addEventListener('abort', cancel, { once: true });
                     if (context.signal.aborted)
                         cancel();
                     const timer = setTimeout(() => controller.abort(Error('Advisor timed out')), options.timeoutMs);
-                    const done = consult(context.sessionID, context.messageID, controller.signal).finally(() => {
+                    const done = context.progress({ title })
+                        .then(() => consult(context.sessionID, context.messageID, controller.signal, topic))
+                        .then(result => ({ ...result, metadata: { ...(result.metadata ?? {}), title } }))
+                        .finally(() => {
                         clearTimeout(timer);
                         context.signal.removeEventListener('abort', cancel);
                         calls.delete(context.sessionID);
