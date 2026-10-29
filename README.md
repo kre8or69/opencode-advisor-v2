@@ -33,8 +33,7 @@ Pass options under the plugin entry's `options` object:
       "package": "/absolute/path/to/opencode-advisor-v2",
       "options": {
         "model": "anthropic/claude-opus-4-7",
-        "variant": "high",
-        "temperature": 0
+        "variant": "high"
       }
     }
   ]
@@ -52,11 +51,11 @@ The plugin uses the `model` option, or the `deepseek/deepseek-v4-pro` fallback w
 | `model` | `"provider/model"` (optional `#variant`) | `deepseek/deepseek-v4-pro` |
 | `variant` | string | Uses the `model` suffix, if present. |
 | `prompt` | string | Uses the built-in system prompt. |
-| `temperature` | finite number | `0` |
+| `temperature` | finite number | Not sent (provider default). |
 | `top_p` | finite number | Not set. |
 | `timeoutMs` | positive, timer-safe integer | `120000` |
 
-A supplied `prompt` replaces the built-in system prompt. Unknown options are rejected at startup. The plugin does not read environment variables; configure it through the plugin entry's `options` object.
+A supplied `prompt` replaces the built-in system prompt. `temperature` is sent only when explicitly configured; omit it for OpenAI GPT-6.1 reasoning models, which reject the parameter. Unknown options are rejected at startup. The plugin does not read environment variables; configure it through the plugin entry's `options` object.
 
 ## Fixed permissions
 
@@ -83,7 +82,7 @@ This policy cannot be overridden. The hidden agent cannot write files, use LSP, 
 2. The executor calls it, optionally with a topic.
 3. The plugin fetches the session transcript, excluding the calling message.
 4. The plugin creates an ephemeral session and prompts the hidden `opencode-advisor:advisor` agent.
-5. The hidden agent supplies its model, system prompt, temperature, and permissions.
+5. The hidden agent supplies its model, system prompt, and permissions. It sends `temperature` only when configured.
 6. The tool returns the response text.
 7. The plugin deletes the ephemeral session.
 

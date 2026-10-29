@@ -138,6 +138,14 @@ test('stalled progress times out with a title and releases the guard',async t=>{
 	await h.cleanup();
 });
 
+test('omits temperature unless explicitly configured',async t=>{
+	const h=host();await h.setup();
+	const e={agent:agentID,options:{},tools:{}};
+	await h.hooks.context(e);
+	t.false('temperature' in e.options);
+	t.false('topP' in e.options);
+	await h.cleanup();
+});
 for(const options of [null,[],{foo:1},{options:{}},{failureThreshold:3},{model:'bad'},{variant:3},{prompt:3},{temperature:NaN},{top_p:Infinity},{timeoutMs:0},{timeoutMs:1.5},{timeoutMs:'1'}]){
 	test(`rejects invalid options ${JSON.stringify(options)}`,async t=>{const h=host(options);await t.throwsAsync(()=>h.setup(),{message:/advisor.*(option|model|variant|prompt|temperature|top_p|timeoutMs)/i}); t.is(h.calls.length,0);});
 }

@@ -69,7 +69,7 @@ function parseOptions(raw) {
     const model = parseModel((o.model ?? 'deepseek/deepseek-v4-pro'), o.variant);
     return { model,
         prompt: o.prompt ?? defaultPrompt,
-        temperature: o.temperature ?? 0,
+        temperature: o.temperature,
         topP: o.top_p, timeoutMs };
 }
 function transcript(messages, excludedID) {
@@ -282,7 +282,8 @@ const plugin = { id: 'opencode-advisor', async setup(ctx) {
             registrations.push(await ctx.session.hook('context', event => {
                 if (event.agent !== advisorAgent)
                     return;
-                event.options.temperature = options.temperature;
+                if (options.temperature !== undefined)
+                    event.options.temperature = options.temperature;
                 if (options.topP !== undefined)
                     event.options.topP = options.topP;
                 for (const name of Object.keys(event.tools))

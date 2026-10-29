@@ -64,7 +64,7 @@ function parseOptions(raw: unknown) {
 	const model = parseModel((o.model ?? 'deepseek/deepseek-v4-pro') as string, o.variant as string | undefined);
 	return {model,
 		prompt: o.prompt as string | undefined ?? defaultPrompt,
-		temperature: o.temperature as number | undefined ?? 0,
+		temperature: o.temperature as number | undefined,
 		topP: o.top_p as number | undefined, timeoutMs};
 }
 
@@ -211,7 +211,7 @@ const plugin: Plugin.Plugin = { id: 'opencode-advisor', async setup(ctx) {
 		})));
 		registrations.push(await ctx.session.hook('context', event=>{
 			if(event.agent !== advisorAgent) return;
-			event.options.temperature=options.temperature;
+			if(options.temperature !== undefined) event.options.temperature=options.temperature;
 			if(options.topP !== undefined) event.options.topP=options.topP;
 			for(const name of Object.keys(event.tools)) if(!safeTools.has(name)) delete event.tools[name];
 		}));
